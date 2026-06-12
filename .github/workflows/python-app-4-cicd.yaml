@@ -1,0 +1,98 @@
+name: python-app-4-cicd
+
+on:
+  push:
+    paths:
+      - src/**
+    branches:
+      - main
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_id: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      -
+        name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      -
+        name: Checkout
+        uses: actions/checkout@v4
+      -
+        name: Set outputs
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT  
+      - 
+        name: Output commit id
+        run: | 
+          echo "Commit ID: ${{ steps.vars.outputs.sha_short }}"
+      -
+        name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          tags: monvillanueva/python-app-4:${{ steps.vars.outputs.sha_short }}
+  cd:
+    needs: ci
+    runs-on: self-hosted
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Modify values file
+        shell: bash
+        run: |
+          echo ${{ needs.ci.outputs.commit_id }}
+          sudo apt update
+          sudo apt install yq -y
+          sudo yq -yi '.image.tag = "${{ needs.ci.outputs.commit_id }}"' charts/python-app-4/values-dev.yaml
+      - name: Commit changes
+        uses: EndBug/add-and-commit@v10
+        with:
+          message: 'Auto-update values.yaml with commit ${{ needs.ci.outputs.commit_id }}'
+      - name: Install Argocd
+        shell: bash
+        run: |
+          sudo curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          sudo chmod +x /usr/local/bin/argocd
+      - name: Connect repo and create app
+        shell: bash
+        run: |
+          # the login url is a hack to allow our runner access to the argo server
+          # since argocd.test.com not accessible because it is a hack for a fake DNS on my system
+          argocd login argocd-server.argocd \
+            --insecure \
+            --grpc-web \
+            --username admin \
+            --password ${{ secrets.ARGOCD_PASSWORD }}
+            
+          # Connect repo to argocd if not already connected, then create app if it doesn't exist
+          repo_url="https://github.com/monvillanueva-continuous-learning/python-app-4.git"
+          argocd repo list | grep -q $repo_url || argocd repo add $repo_url
+
+          # Create app
+          argocd app get python-app-4 || argocd app create python-app-4 \
+            --repo $repo_url \
+            --path charts/python-app-4 \
+            --dest-server https://kubernetes.default.svc \
+            --dest-namespace dev \
+            --values values-dev.yaml \
+            --revision main \
+            --sync-policy manual \
+            --sync-option CreateNamespace=true
+      - name: Argocd app sync
+        shell: bash
+        run: |
+          # the login url is a hack to allow our runner access to the argo server
+          # since argocd.test.com not accessible because it is a hack for a fake DNS on my system
+          argocd login argocd-server.argocd \
+            --insecure \
+            --grpc-web \
+            --username admin \
+            --password ${{ secrets.ARGOCD_PASSWORD }}
+          argocd app sync python-app-4
+          argocd app wait python-app-4 --timeout 180
