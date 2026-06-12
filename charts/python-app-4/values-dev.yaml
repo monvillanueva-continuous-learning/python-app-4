@@ -1,6 +1,7 @@
 replicaCount: 1
-
-resources: 
+resources:
   requests:
     memory: 40M
     cpu: 40m
+image:
+  tag: 809d007
